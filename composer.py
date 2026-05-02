@@ -1,8 +1,146 @@
 from __future__ import annotations
 
+import json
+import logging
+import os
+import urllib.error
+import urllib.request
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
+
+logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Gemini configuration — set GEMINI_API_KEY on Render
+# ---------------------------------------------------------------------------
+_GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "")
+_GEMINI_MODEL: str = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
+_GEMINI_TIMEOUT: int = 10  # seconds per call
+
+_GEMINI_SYSTEM = """You are Vera, magicpin's AI assistant that sends WhatsApp messages to local merchants.
+Compose ONE short, high-engagement message.
+
+SCORING DIMENSIONS — maximise all five:
+1. SPECIFICITY: Cite real numbers, dates, percentages directly from the context. Never invent data.
+2. CATEGORY FIT: Match the voice exactly.
+   - dentists: clinical, peer-to-peer, use "Dr. <surname>" salutation, technical terms OK
+   - salons: warm, friendly, practical
+   - restaurants: operator-to-operator, direct
+   - gyms: coaching, motivational
+   - pharmacies: trustworthy, precise
+3. MERCHANT FIT: Use the merchant's name, owner name, and locality. Honor language preference.
+4. DECISION QUALITY: Ground the message in WHY NOW — pull specific data from the trigger payload.
+5. ENGAGEMENT COMPULSION: Create urgency or curiosity. End with a single frictionless CTA.
+
+LANGUAGE RULES:
+- Hindi preference → mix Namaste/kiya/kijiye naturally, rest English
+- Tamil → Vanakkam
+- Telugu → Namaskaram
+- Default → English
+
+STRICT RULES:
+- Use ONLY data present in the provided context. Zero fabrication.
+- No internal jargon: never mention "trigger", "payload", "context", "WhatsApp preview", "scope", "slug".
+- Max ~300 characters in body (WhatsApp-friendly).
+- send_as = "vera" for merchant-facing messages; "merchant_on_behalf" for customer-facing messages.
+
+RESPOND WITH VALID JSON ONLY — no markdown, no extra keys:
+{
+  "body": "<message text>",
+  "cta": "binary_yes_no|open_ended|multi_choice",
+  "send_as": "vera|merchant_on_behalf",
+  "rationale": "<one sentence: what data grounded this message>"
+}"""
+
+
+def _call_gemini(prompt: str) -> dict | None:
+    """Call Gemini API. Returns parsed JSON dict or None on any failure."""
+    if not _GEMINI_API_KEY:
+        return None
+    url = (
+        f"https://generativelanguage.googleapis.com/v1beta/models/"
+        f"{_GEMINI_MODEL}:generateContent?key={_GEMINI_API_KEY}"
+    )
+    full_prompt = f"{_GEMINI_SYSTEM}\n\n{prompt}"
+    body = json.dumps({
+        "contents": [{"parts": [{"text": full_prompt}]}],
+        "generationConfig": {
+            "temperature": 0.3,
+            "maxOutputTokens": 512,
+            "responseMimeType": "application/json",
+        },
+    }).encode("utf-8")
+    req = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=_GEMINI_TIMEOUT) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        text = data["candidates"][0]["content"]["parts"][0]["text"]
+        # Strip accidental markdown fences
+        text = text.strip().lstrip("```json").lstrip("```").rstrip("```").strip()
+        parsed = json.loads(text)
+        # Validate required keys
+        if all(k in parsed for k in ("body", "cta", "send_as", "rationale")):
+            return parsed
+        return None
+    except Exception as exc:
+        logger.warning("Gemini call failed: %s", exc)
+        return None
+
+
+def _compose_with_gemini(
+    category: dict, merchant: dict, trigger: dict, customer: dict | None
+) -> dict | None:
+    """Build context-rich prompt and call Gemini. Returns msg dict or None."""
+    identity = merchant.get("identity", {})
+    perf = merchant.get("performance", {})
+    offers = [o.get("title") for o in merchant.get("offers", []) if o.get("status") == "active"]
+    signals = merchant.get("signals", [])
+    review_themes = merchant.get("review_themes", [])
+    customer_agg = merchant.get("customer_aggregate", {})
+
+    cust_block = ""
+    if customer:
+        cust_id = customer.get("identity", {})
+        cust_rel = customer.get("relationship", {})
+        cust_block = f"""
+CUSTOMER:
+  Name: {cust_id.get('name')}
+  Language preference: {cust_id.get('language_pref')}
+  Last visit: {cust_rel.get('last_visit')}
+  Services received: {cust_rel.get('services_received', [])}
+  Consent scopes: {customer.get('consent', {}).get('scope', [])}"""
+
+    prompt = f"""COMPOSE A MESSAGE FOR THIS CONTEXT:
+
+CATEGORY:
+  Slug: {category.get('slug')}
+  Voice tone: {category.get('voice', {}).get('tone')}
+  Vocabulary taboos: {category.get('voice', {}).get('vocab_taboo', [])[:5]}
+  Peer stats: {json.dumps(category.get('peer_stats', {}))}
+
+MERCHANT:
+  Business name: {identity.get('name')}
+  Owner first name: {identity.get('owner_first_name')}
+  Locality: {identity.get('locality')}, {identity.get('city')}
+  Languages: {identity.get('languages', [])}
+  Performance (30d): views={perf.get('views')}, calls={perf.get('calls')}, ctr={perf.get('ctr')}, directions={perf.get('directions')}
+  7d delta: {json.dumps(perf.get('delta_7d', {}))}
+  Active offers: {offers}
+  Signals: {signals}
+  Review themes: {review_themes}
+  Customer aggregate: {json.dumps(customer_agg)}
+  Subscription: {json.dumps(merchant.get('subscription', {}))}
+{cust_block}
+TRIGGER:
+  Kind: {trigger.get('kind')}
+  Scope: {trigger.get('scope')}
+  Urgency: {trigger.get('urgency')}
+  Payload: {json.dumps(trigger.get('payload', {}))}
+
+Compose the most specific, compelling, data-grounded message possible using ONLY the above context."""
+
+    return _call_gemini(prompt)
 
 
 @dataclass
@@ -1080,7 +1218,10 @@ def _compose_wedding_followup(category: dict, merchant: dict, trigger: dict, cus
     )
 
 
-def compose(category: dict, merchant: dict, trigger: dict, customer: dict | None = None) -> dict | None:
+def _compose_template(
+    category: dict, merchant: dict, trigger: dict, customer: dict | None
+) -> dict | None:
+    """Original deterministic template composer — used as fallback."""
     scope = trigger.get("scope", "merchant")
     if scope == "customer":
         if not customer:
@@ -1103,7 +1244,7 @@ def compose(category: dict, merchant: dict, trigger: dict, customer: dict | None
         elif kind == "wedding_package_followup":
             msg = _compose_wedding_followup(category, merchant, trigger, customer, style)
         else:
-            return None
+            msg = None
     else:
         style = _language_style_from_list(merchant.get("identity", {}).get("languages"))
         kind = trigger.get("kind")
@@ -1146,15 +1287,37 @@ def compose(category: dict, merchant: dict, trigger: dict, customer: dict | None
         elif kind == "dormant_with_vera":
             msg = _compose_dormant(category, merchant, trigger, style)
         else:
-            return None
+            msg = None
 
     if not msg:
         return None
 
+    suppression_key = trigger.get("suppression_key") or trigger.get("id", "")
     return {
         "body": msg.body,
         "cta": msg.cta,
         "send_as": msg.send_as,
-        "suppression_key": msg.suppression_key,
+        "suppression_key": suppression_key,
         "rationale": msg.rationale,
     }
+
+
+def compose(category: dict, merchant: dict, trigger: dict, customer: dict | None = None) -> dict | None:
+    """Compose a message. Tries Gemini LLM first; falls back to deterministic templates."""
+    # Guard: customer-scope requires consent
+    if trigger.get("scope") == "customer":
+        if not customer:
+            return None
+        if not customer.get("consent", {}).get("scope"):
+            return None
+
+    # 1. Try Gemini
+    if _GEMINI_API_KEY:
+        result = _compose_with_gemini(category, merchant, trigger, customer)
+        if result and result.get("body"):
+            suppression_key = trigger.get("suppression_key") or trigger.get("id", "")
+            result["suppression_key"] = suppression_key
+            return result
+
+    # 2. Fall back to templates
+    return _compose_template(category, merchant, trigger, customer)
