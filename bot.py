@@ -7,7 +7,7 @@ from datetime import datetime
 from typing import Any
 
 from fastapi import FastAPI
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 from pydantic import BaseModel
 
 from composer import compose
@@ -161,6 +161,11 @@ def _build_action(trigger_id: str) -> dict[str, Any] | None:
         "messages": [{"from": msg["send_as"], "msg": msg["body"]}],
     }
     return action
+
+
+@app.get("/")
+def root():
+    return RedirectResponse(url="/v1/healthz")
 
 
 @app.get("/v1/healthz")
