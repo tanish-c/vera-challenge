@@ -55,16 +55,6 @@ def _format_pct(value: float | int | None) -> str | None:
         return None
 
 
-def _format_inr(value: Any) -> str | None:
-    if value is None:
-        return None
-    try:
-        v = float(str(value).replace("₹", "").replace(",", "").strip())
-        return f"₹{int(v):,}"
-    except Exception:
-        return None
-
-
 def _safe_int(value: Any) -> str | None:
     try:
         return f"{int(value)}"
@@ -147,30 +137,14 @@ def _find_digest_item(category: dict, item_id: str | None) -> dict | None:
     return None
 
 
-def _best_offer(merchant: dict, category: dict) -> dict | None:
+def _best_offer_title(merchant: dict, category: dict) -> str | None:
     offers = [o for o in merchant.get("offers", []) if o.get("status") == "active"]
     if offers:
-        return offers[0]
+        return offers[0].get("title")
     catalog = category.get("offer_catalog", [])
     if catalog:
-        return catalog[0]
+        return catalog[0].get("title")
     return None
-
-
-def _best_offer_title(merchant: dict, category: dict) -> str | None:
-    offer = _best_offer(merchant, category)
-    return offer.get("title") if offer else None
-
-
-def _best_offer_line(merchant: dict, category: dict) -> str | None:
-    offer = _best_offer(merchant, category)
-    if not offer:
-        return None
-    title = offer.get("title")
-    price = _format_inr(offer.get("price") or offer.get("discounted_price") or offer.get("value"))
-    if title and price:
-        return f"{title} at {price}"
-    return title
 
 
 def _merchant_first_name(merchant: dict) -> str | None:
@@ -359,6 +333,15 @@ def _cta_slots(style: str, slot1: str, slot2: str | None) -> str:
     return f"Reply YES for {slot1}, or share a time that works."
 
 
+def _whatsapp_preview(category: dict, merchant: dict, short_offer: str | None, action_label: str = "Reply YES") -> str:
+    merchant_name = merchant.get("identity", {}).get("name") or "Hi"
+    # build a compact 3-line WhatsApp preview to increase send-read clarity
+    line1 = f"Hi {merchant_name.split()[0]} — {short_offer or 'quick update for your customers' }."
+    line2 = "Limited slots this week — book now." if short_offer else "Quick note — reply to act." 
+    line3 = action_label
+    return f'WhatsApp preview: "{line1}" / "{line2}" / "{line3}"'
+
+
 def _merchant_perf_anchor(merchant: dict, category: dict, metric: str) -> str | None:
     perf = merchant.get("performance", {})
     value = perf.get(metric)
@@ -376,24 +359,23 @@ def _merchant_perf_anchor(merchant: dict, category: dict, metric: str) -> str | 
         val_pct = _format_pct(_safe_float(value))
         peer_pct = _format_pct(_safe_float(peer))
         if val_pct and peer_pct:
-            return f"Your {metric_label} is {val_pct} vs peer avg {peer_pct}."
+            return f"Your {metric_label} is {val_pct} vs peer {peer_pct}."
     if peer is not None:
-        return f"Current {metric_label}: {value} vs peer avg {peer}."
+        return f"Current {metric_label}: {value} (peer avg {peer})."
     return f"Current {metric_label}: {value}."
 
 
 def _suggestion_for_category(category: dict, merchant: dict) -> str:
     slug = category.get("slug")
-    offer_line = _best_offer_line(merchant, category)
-    offer_title = _best_offer_title(merchant, category)
+    offer = _best_offer_title(merchant, category)
     if slug == "dentists":
-        return f"refresh a Google post with {offer_line or offer_title}" if (offer_line or offer_title) else "refresh a Google post this week"
+        return f"refresh a Google post with {offer}" if offer else "refresh a Google post this week"
     if slug == "salons":
-        return f"push {offer_line or offer_title} and add a walk-in available note" if (offer_line or offer_title) else "add a walk-in available note"
+        return f"push {offer} and add a walk-in available note" if offer else "add a walk-in available note"
     if slug == "restaurants":
-        return f"highlight {offer_line or offer_title} for weekday demand" if (offer_line or offer_title) else "highlight a weekday offer"
+        return f"highlight {offer} for weekday demand" if offer else "highlight a weekday offer"
     if slug == "gyms":
-        return f"run a 2-week attendance challenge with {offer_line or offer_title}" if (offer_line or offer_title) else "run a 2-week attendance challenge"
+        return f"run a 2-week attendance challenge and promote {offer}" if offer else "run a 2-week attendance challenge"
     if slug == "pharmacies":
         return "set up a WhatsApp refill reminder + delivery flow"
     return "share one focused offer update"
@@ -409,6 +391,8 @@ def _compose_research_digest(category: dict, merchant: dict, trigger: dict, styl
         return None
     parts = []
     parts.append(_opening_line(category, merchant, style, item.get("title", "new research update")))
+    if category.get("slug") == "dentists":
+        parts.append("Hope the clinic week is running smoothly.")
     trial_n = item.get("trial_n")
     if trial_n:
         parts.append(f"Trial n={trial_n}.")
@@ -423,6 +407,10 @@ def _compose_research_digest(category: dict, merchant: dict, trigger: dict, styl
     actionable = item.get("actionable")
     if actionable:
         parts.append(f"Action: {actionable}.")
+    if item.get("summary"):
+        scope_note = item.get("scope_note") or item.get("applicability")
+        if scope_note:
+            parts.append(scope_note)
     anchor = _merchant_perf_anchor(merchant, category, "ctr")
     if anchor:
         parts.append(anchor)
@@ -432,11 +420,11 @@ def _compose_research_digest(category: dict, merchant: dict, trigger: dict, styl
     snapshot = _merchant_snapshot(merchant, category)
     if snapshot:
         parts.append(snapshot)
-    offer_line = _best_offer_line(merchant, category)
-    if offer_line:
-        parts.append(f"Want me to draft a recall message around {offer_line}? Reply YES.")
+    efficacy = item.get("efficacy_stat") or item.get("benefit_stat")
+    if efficacy:
+        parts.append(f"Want me to draft a patient recall update using this data ({efficacy})? Reply YES.")
     else:
-        parts.append("Want me to draft a recall update for your high-risk patients? Reply YES.")
+        parts.append("Want me to draft a patient recall message using this data? Reply YES.")
     body = " ".join([p.strip() for p in parts if p])
     return ComposedMessage(
         body=body,
@@ -454,15 +442,20 @@ def _compose_regulation_change(category: dict, merchant: dict, trigger: dict, st
     deadline = _format_date(payload.get("deadline_iso"))
     actionable = item.get("actionable") if item else None
     parts = [_opening_line(category, merchant, style, f"Compliance update: {title}.", hook=_compose_hook(category, "Compliance note"))]
+    if category.get("slug") == "dentists":
+        parts.append("Quick note for your clinic this week.")
     if deadline:
         parts.append(f"Deadline: {deadline}.")
+        parts.append("Best to update SOPs before the deadline to stay compliant.")
     if actionable:
         parts.append(f"Action: {actionable}.")
     if item and item.get("summary"):
-        parts.append(item["summary"])
+        technical = item.get("technical_detail") or item.get("summary")
+        if technical:
+            parts.append(technical)
     if item and item.get("source"):
-        parts.append(f"Source: {item.get('source')}.")
-    parts.append("Want me to draft a 5-point checklist today? Reply YES.")
+        parts.append(f"Source: {item.get('source')}")
+    parts.append("Want me to draft a 5-point checklist today? Happy to send it now - reply YES.")
     return ComposedMessage(
         body=" ".join(parts),
         cta="binary_yes_no",
@@ -478,7 +471,7 @@ def _compose_cde_opportunity(category: dict, merchant: dict, trigger: dict, styl
     title = item.get("title") if item else "CDE opportunity"
     date = _format_date(item.get("date") if item else None)
     credits = payload.get("credits") or (item.get("credits") if item else None)
-    fee = _format_inr(payload.get("fee")) or payload.get("fee")
+    fee = payload.get("fee")
     parts = [_opening_line(category, merchant, style, f"{title}.", hook=_compose_hook(category, "CDE opportunity"))]
     if date:
         parts.append(f"Date: {date}.")
@@ -487,8 +480,8 @@ def _compose_cde_opportunity(category: dict, merchant: dict, trigger: dict, styl
     if fee:
         parts.append(f"Fee: {fee}.")
     if item and item.get("source"):
-        parts.append(f"Source: {item.get('source')}.")
-    parts.append("Want me to block your slot? Reply YES.")
+        parts.append(f"Source: {item.get('source')}")
+    parts.append("Want me to block your slot?")
     return ComposedMessage(
         body=" ".join(parts),
         cta="binary_yes_no",
@@ -561,7 +554,7 @@ def _compose_perf_spike(category: dict, merchant: dict, trigger: dict, style: st
     snapshot = _merchant_snapshot(merchant, category)
     if snapshot:
         parts.append(snapshot)
-    parts.append(f"Want me to double down with {suggestion}? Reply YES.")
+    parts.append(f"Want me to double down with {suggestion}?")
     return ComposedMessage(
         body=" ".join(parts),
         cta="binary_yes_no",
@@ -577,16 +570,12 @@ def _compose_seasonal_perf_dip(category: dict, merchant: dict, trigger: dict, st
     note = payload.get("season_note") or "seasonal dip"
     metric = payload.get("metric") or "views"
     metric_label = _metric_label(category, metric)
-    offer_line = _best_offer_line(merchant, category)
     if delta:
-        parts = [_opening_line(category, merchant, style, f"{metric_label} down {delta} — expected {note}.", hook=_compose_hook(category, "Seasonal note"))]
+        parts = [_opening_line(category, merchant, style, f"{metric_label} down {delta} - expected {note}.", hook=_compose_hook(category, "Seasonal note"))]
     else:
         parts = [_opening_line(category, merchant, style, f"This is the expected {note} period.", hook=_compose_hook(category, "Seasonal note"))]
-    if offer_line:
-        parts.append(f"Best retention play now: push {offer_line} to existing customers.")
-    else:
-        parts.append("Best play now: retention nudge to existing customers.")
-    parts.append("Want me to draft one? Reply YES.")
+    parts.append("Focus on retention now; we can switch to acquisition later.")
+    parts.append("Want me to draft a retention nudge?")
     return ComposedMessage(
         body=" ".join(parts),
         cta="binary_yes_no",
@@ -601,7 +590,7 @@ def _compose_renewal_due(category: dict, merchant: dict, trigger: dict, style: s
     sub = merchant.get("subscription", {})
     days = _safe_int(payload.get("days_remaining") or sub.get("days_remaining"))
     plan = payload.get("plan") or sub.get("plan")
-    amount = _format_inr(payload.get("renewal_amount")) or payload.get("renewal_amount")
+    amount = payload.get("renewal_amount")
     expired_days = _safe_int(sub.get("days_since_expiry")) if sub.get("status") == "expired" else None
     if days:
         parts = [_opening_line(category, merchant, style, f"Your {plan or 'plan'} renews in {days} days.", hook=_compose_hook(category, "Subscription note"))]
@@ -611,7 +600,7 @@ def _compose_renewal_due(category: dict, merchant: dict, trigger: dict, style: s
         parts = [_opening_line(category, merchant, style, f"Your {plan or 'plan'} renewal is coming up soon.", hook=_compose_hook(category, "Subscription note"))]
     if amount:
         parts.append(f"Renewal amount: {amount}.")
-    parts.append("Want me to start the renewal now? Reply YES.")
+    parts.append("Want me to start the renewal now?")
     return ComposedMessage(
         body=" ".join(parts),
         cta="binary_yes_no",
@@ -627,8 +616,7 @@ def _compose_festival_upcoming(category: dict, merchant: dict, trigger: dict, st
     date = _format_date(payload.get("date"))
     days = _safe_int(payload.get("days_until"))
     note = None
-    offer_line = _best_offer_line(merchant, category)
-    offer_title = _best_offer_title(merchant, category)
+    offer = _best_offer_title(merchant, category)
     if not festival:
         seasonal = category.get("seasonal_beats", [])
         beat = seasonal[0] if seasonal else None
@@ -646,8 +634,8 @@ def _compose_festival_upcoming(category: dict, merchant: dict, trigger: dict, st
     parts = [_opening_line(category, merchant, style, f"{lead}.", hook=_compose_hook(category, "Seasonal note"))]
     if not payload.get("festival") and note:
         parts.append(f"Note: {note}.")
-    if offer_line or offer_title:
-        parts.append(f"Recommend highlighting {offer_line or offer_title} for the festival window.")
+    if offer:
+        parts.append(f"Recommend highlighting {offer} for the festival window.")
     parts.append(_cta_open(style))
     return ComposedMessage(
         body=" ".join(parts),
@@ -691,8 +679,7 @@ def _compose_winback(category: dict, merchant: dict, trigger: dict, style: str) 
     dip = _format_pct(payload.get("perf_dip_pct"))
     lapsed = (merchant.get("customer_aggregate", {}).get("lapsed_90d_plus")
               or merchant.get("customer_aggregate", {}).get("lapsed_180d_plus"))
-    offer_line = _best_offer_line(merchant, category)
-    offer_title = _best_offer_title(merchant, category)
+    offer = _best_offer_title(merchant, category)
     if days and dip:
         parts = [_opening_line(category, merchant, style, f"{days} days since expiry and performance down {dip}.", hook=_compose_hook(category, "Winback note"))]
     elif days:
@@ -701,8 +688,8 @@ def _compose_winback(category: dict, merchant: dict, trigger: dict, style: str) 
         parts = [_opening_line(category, merchant, style, "A winback nudge is due based on recent activity.", hook=_compose_hook(category, "Winback note"))]
     if lapsed:
         parts.append(f"Lapsed customers: {lapsed}.")
-    if offer_line or offer_title:
-        parts.append(f"We can run a winback with {offer_line or offer_title}.")
+    if offer:
+        parts.append(f"We can run a winback with {offer}.")
     parts.append(_cta_open(style))
     return ComposedMessage(
         body=" ".join(parts),
@@ -732,14 +719,13 @@ def _compose_ipl_match(category: dict, merchant: dict, trigger: dict, style: str
     if digest and digest.get("summary"):
         parts.append(digest.get("summary"))
     if is_weeknight is False:
-        parts.append("Weekend IPL shifts covers to home-watch; delivery performs better than dine-in.")
+        parts.append("Weekend IPL shifts covers to home-watch; delivery performs better.")
     elif is_weeknight is True:
         parts.append("Weeknight IPL usually lifts delivery covers.")
-    offer_line = _best_offer_line(merchant, category)
-    offer_title = _best_offer_title(merchant, category)
-    if offer_line or offer_title:
-        parts.append(f"Recommend pushing {offer_line or offer_title} as a delivery special.")
-    parts.append("Want me to draft the banner + WhatsApp copy? Reply YES.")
+    offer = _best_offer_title(merchant, category)
+    if offer:
+        parts.append(f"Recommend highlighting {offer} as a delivery push.")
+    parts.append("Want me to draft the banner + WhatsApp copy?")
     return ComposedMessage(
         body=" ".join(parts),
         cta="binary_yes_no",
@@ -769,7 +755,7 @@ def _compose_review_theme(category: dict, merchant: dict, trigger: dict, style: 
         parts = [_opening_line(category, merchant, style, "A review theme needs attention this week.", hook=_compose_hook(category, "Reputation note"))]
     if quote:
         parts.append(f"Example: \"{quote}\".")
-    parts.append("Want me to draft a short public reply + a fix note for staff? Reply YES.")
+    parts.append("Want me to draft a short public reply + a fix note for staff?")
     return ComposedMessage(
         body=" ".join(parts),
         cta="binary_yes_no",
@@ -785,10 +771,10 @@ def _compose_milestone(category: dict, merchant: dict, trigger: dict, style: str
     value_now = payload.get("value_now")
     milestone = payload.get("milestone_value")
     if value_now is not None and milestone is not None and metric:
-        parts = [_opening_line(category, merchant, style, f"You are at {value_now} {metric} — {milestone - value_now if isinstance(milestone, (int, float)) and isinstance(value_now, (int, float)) else 'close'} away from {milestone}.", hook=_compose_hook(category, "Milestone note"))]
+        parts = [_opening_line(category, merchant, style, f"You are at {value_now} {metric} - close to {milestone}.", hook=_compose_hook(category, "Milestone note"))]
     else:
         parts = [_opening_line(category, merchant, style, "You are near a milestone this week.", hook=_compose_hook(category, "Milestone note"))]
-    parts.append("Want me to draft a review-ask message to cross it? Reply YES.")
+    parts.append("Want me to draft a review-ask message to cross the milestone?")
     return ComposedMessage(
         body=" ".join(parts),
         cta="binary_yes_no",
@@ -801,18 +787,16 @@ def _compose_milestone(category: dict, merchant: dict, trigger: dict, style: str
 def _compose_active_planning(category: dict, merchant: dict, trigger: dict, style: str) -> ComposedMessage:
     payload = trigger.get("payload", {})
     topic = payload.get("intent_topic", "plan")
-    offer_line = _best_offer_line(merchant, category)
-    offer_title = _best_offer_title(merchant, category)
-    offer_ref = offer_line or offer_title or "your best-selling offer"
+    offer = _best_offer_title(merchant, category) or "your best-selling offer"
     note = payload.get("merchant_last_message")
     lines = [
         "Starter outline (edit as needed):",
-        f"- Base offer: {offer_ref}",
+        f"- Base offer: {offer}",
         "- Order window: day-before cutoff",
         "- Delivery window: slot you prefer",
         "- Min order: set a bulk threshold",
     ]
-    draft = f"Draft copy: \"{offer_ref}. Reply with date + headcount and I will confirm the slot.\""
+    draft = f"Draft copy: \"{offer}. Reply with date + headcount and I will confirm the slot.\""
     if "kids_yoga" in topic:
         lines = [
             "Starter outline (edit as needed):",
@@ -834,7 +818,7 @@ def _compose_active_planning(category: dict, merchant: dict, trigger: dict, styl
         parts.insert(1, f"Noted: {note}.")
     parts.append("\n".join(lines))
     parts.append(draft)
-    parts.append("Want me to finalize the WhatsApp copy? Reply YES.")
+    parts.append("Want me to draft the final WhatsApp copy for this?")
     return ComposedMessage(
         body=" ".join(parts),
         cta="binary_yes_no",
@@ -849,8 +833,7 @@ def _compose_competitor(category: dict, merchant: dict, trigger: dict, style: st
     competitor = payload.get("competitor_name")
     distance = payload.get("distance_km")
     their_offer = payload.get("their_offer")
-    offer_line = _best_offer_line(merchant, category)
-    offer_title = _best_offer_title(merchant, category)
+    offer = _best_offer_title(merchant, category)
     if competitor:
         distance_text = f" {distance} km away" if distance is not None else " nearby"
         offer_text = f" with {their_offer}" if their_offer else ""
@@ -858,10 +841,10 @@ def _compose_competitor(category: dict, merchant: dict, trigger: dict, style: st
     else:
         loc = _merchant_locality(merchant)
         loc_text = f" near {loc}" if loc else " nearby"
-        parts = [_opening_line(category, merchant, style, f"A new competitor opened{loc_text}.", hook=_compose_hook(category, "Market note"))]
-    if offer_line or offer_title:
-        parts.append(f"Counter by highlighting {offer_line or offer_title} and your reviews.")
-    parts.append("Want me to draft the counter-offer post? Reply YES.")
+        parts = [_opening_line(category, merchant, style, f"A new competitor opened{loc_text}. Details are still loading.", hook=_compose_hook(category, "Market note"))]
+    if offer:
+        parts.append(f"We can counter by highlighting {offer} and your reviews.")
+    parts.append("Want me to draft the counter-offer post?")
     return ComposedMessage(
         body=" ".join(parts),
         cta="binary_yes_no",
@@ -878,11 +861,11 @@ def _compose_supply_alert(category: dict, merchant: dict, trigger: dict, style: 
     manufacturer = payload.get("manufacturer")
     if batches:
         manufacturer_text = f" by {manufacturer}" if manufacturer else ""
-        parts = [_opening_line(category, merchant, style, f"Supply alert: {molecule} recall — batches {batches}{manufacturer_text}.", hook=_compose_hook(category, "Safety note"))]
+        parts = [_opening_line(category, merchant, style, f"Supply alert: {molecule} recall - batches {batches}{manufacturer_text}.", hook=_compose_hook(category, "Safety note"))]
     else:
         parts = [_opening_line(category, merchant, style, f"Supply alert: {molecule} recall on specific batches.", hook=_compose_hook(category, "Safety note"))]
     parts.append("Pull affected batches and notify repeat patients where needed.")
-    parts.append("Want me to draft the customer WhatsApp and return workflow? Reply YES.")
+    parts.append("Want me to draft the customer WhatsApp and return workflow?")
     return ComposedMessage(
         body=" ".join(parts),
         cta="binary_yes_no",
@@ -901,7 +884,7 @@ def _compose_category_seasonal(category: dict, merchant: dict, trigger: dict, st
     parts = [_opening_line(category, merchant, style, f"Seasonal shift: {trend_text}.", hook=_compose_hook(category, "Seasonal note"))]
     if payload.get("shelf_action_recommended"):
         parts.append("Shelf action recommended for faster discovery.")
-    parts.append("Want me to draft a shelf/offer update note for your team? Reply YES.")
+    parts.append("Want me to draft a shelf/offer update note for your team?")
     return ComposedMessage(
         body=" ".join(parts),
         cta="binary_yes_no",
@@ -916,11 +899,11 @@ def _compose_gbp_unverified(category: dict, merchant: dict, trigger: dict, style
     uplift = _format_pct(payload.get("estimated_uplift_pct"))
     parts = [_opening_line(category, merchant, style, "Your Google profile is still unverified.", hook=_compose_hook(category, "Visibility note"))]
     if uplift:
-        parts.append(f"Verification typically lifts customer actions by ~{uplift}.")
+        parts.append(f"Verification typically lifts actions by ~{uplift}.")
     path = payload.get("verification_path")
     if path:
         parts.append(f"Verification path: {path.replace('_', ' ')}.")
-    parts.append("Want me to start the verification flow? Reply YES.")
+    parts.append("Want me to start the verification flow?")
     return ComposedMessage(
         body=" ".join(parts),
         cta="binary_yes_no",
@@ -944,10 +927,7 @@ def _compose_dormant(category: dict, merchant: dict, trigger: dict, style: str) 
             parts = [_opening_line(category, merchant, style, f"Last update was on {last_ts}.", hook=_compose_hook(category, "Quick check"))]
         else:
             parts = [_opening_line(category, merchant, style, "It has been a while since our last update.", hook=_compose_hook(category, "Quick check"))]
-    snapshot = _merchant_snapshot(merchant, category)
-    if snapshot:
-        parts.append(snapshot)
-    parts.append("Want a quick weekly insight again? Reply YES.")
+    parts.append("Want a quick weekly insight again?")
     return ComposedMessage(
         body=" ".join(parts),
         cta="binary_yes_no",
@@ -967,14 +947,14 @@ def _compose_customer_recall(category: dict, merchant: dict, trigger: dict, cust
     slots = payload.get("available_slots", [])
     slot1 = slots[0].get("label") if slots else None
     slot2 = slots[1].get("label") if len(slots) > 1 else None
-    offer_line = _best_offer_line(merchant, category)
+    offer = _best_offer_title(merchant, category)
     parts = [f"{_customer_salutation(customer, style)}, {merchant.get('identity', {}).get('name', 'your clinic')} here."]
     if last_service:
         parts.append(f"Last visit: {last_service}.")
     if due_date:
         parts.append(f"Your {service_due.replace('_', ' ')} is due on {due_date}.")
-    if offer_line:
-        parts.append(f"Offer: {offer_line}.")
+    if offer:
+        parts.append(f"Offer: {offer}.")
     if slot1:
         parts.append(_cta_slots(style, slot1, slot2))
     else:
@@ -992,7 +972,7 @@ def _compose_customer_lapse(category: dict, merchant: dict, trigger: dict, custo
     payload = trigger.get("payload", {})
     days = _safe_int(payload.get("days_since_last_visit"))
     focus = payload.get("previous_focus")
-    offer_line = _best_offer_line(merchant, category)
+    offer = _best_offer_title(merchant, category)
     parts = [f"{_customer_salutation(customer, style)}, {merchant.get('identity', {}).get('name', 'your gym')} here."]
     if days:
         parts.append(f"It has been about {days} days since your last visit.")
@@ -1008,8 +988,8 @@ def _compose_customer_lapse(category: dict, merchant: dict, trigger: dict, custo
             last_service = services[-1]
             if last_service and last_service != "...":
                 parts.append(f"Last service: {last_service.replace('_', ' ')}.")
-    if offer_line:
-        parts.append(f"Current offer: {offer_line}.")
+    if offer:
+        parts.append(f"Current offer: {offer}.")
     parts.append("Want me to hold a trial slot for you this week? Reply YES.")
     return ComposedMessage(
         body=" ".join(parts),
@@ -1028,7 +1008,7 @@ def _compose_trial_followup(category: dict, merchant: dict, trigger: dict, custo
     parts = [f"{_customer_salutation(customer, style)}, thanks for the trial on {trial_date}."]
     if slot:
         parts.append(f"Next slot available: {slot}.")
-        parts.append(_cta_yes_no(style))
+        parts.append(f"{_cta_yes_no(style)}")
     else:
         parts.append("Want to book your next session? Reply YES.")
     return ComposedMessage(
@@ -1085,7 +1065,7 @@ def _compose_wedding_followup(category: dict, merchant: dict, trigger: dict, cus
     date = _format_short_date(payload.get("wedding_date"))
     parts = [f"{_customer_salutation(customer, style)}, {merchant.get('identity', {}).get('name', 'your salon')} here."]
     if days:
-        parts.append(f"{days} days to the wedding — perfect time to start {next_step}.")
+        parts.append(f"{days} days to the wedding - perfect time to start {next_step}.")
     else:
         parts.append(f"Wedding prep window is open for {next_step}.")
     if date:
